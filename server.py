@@ -14,9 +14,9 @@ CLIENTS = {}
 CLIENTS_LOCK = threading.Lock()
 
 OPERATORS = {
-    "admin": {"password": os.environ.get("SWILL_ADMIN_PW", "change-me"), "role": "admin"},
-    "op1":   {"password": os.environ.get("SWILL_OP1_PW", "change-me-too"), "role": "operator"},
-    "viewer": {"password": os.environ.get("SWILL_VIEWER_PW", "change-me-three"), "role": "viewer"},
+    "admin":  {"password": os.environ.get("CROCK_ADMIN_PW",  "change-me"),       "role": "admin"},
+    "op1":    {"password": os.environ.get("CROCK_OP1_PW",    "change-me-too"),   "role": "operator"},
+    "viewer": {"password": os.environ.get("CROCK_VIEWER_PW", "change-me-three"), "role": "viewer"},
 }
 
 app = Flask(__name__)
