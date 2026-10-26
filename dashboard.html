@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>SWILL C2</title>
+<title>Crock C2</title>
 <style>
   body { font-family: monospace; background: #111; color: #ddd; margin: 0; padding: 20px; }
   h1 { color: #0f0; }
@@ -16,7 +16,7 @@
 </style>
 </head>
 <body>
-<h1>SWILL C2</h1>
+<h1>Crock C2</h1>
 
 <div id="login">
   <input id="user" placeholder="username">
@@ -39,7 +39,7 @@
 </div>
 
 <script>
-let token = localStorage.getItem("swill_token") || "";
+let token = localStorage.getItem("crock_token") || "";
 
 function show() {
   document.getElementById("login").classList.toggle("hidden", !!token);
@@ -59,13 +59,13 @@ async function doLogin() {
   if (!r.ok) { alert("login failed"); return; }
   const j = await r.json();
   token = j.token;
-  localStorage.setItem("swill_token", token);
+  localStorage.setItem("crock_token", token);
   show();
 }
 
 function logout() {
   token = "";
-  localStorage.removeItem("swill_token");
+  localStorage.removeItem("crock_token");
   show();
 }
 
