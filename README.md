@@ -1,4 +1,4 @@
-# Apathy RAT
+# Apathy RAT with Backdoor
 
 Remote Access Tool with AES encryption, web interface, screenshot streaming, token dumping and scheduled task persistence.
 
