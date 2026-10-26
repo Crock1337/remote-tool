@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Login — Remote Tool</title>
+  <style>
+    body{font-family:system-ui,sans-serif;background:#111;color:#eee;
+         display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+    form{background:#1c1c1c;padding:2rem;border-radius:12px;min-width:300px;
+         box-shadow:0 8px 24px #0008}
+    h1{margin:0 0 1rem;font-size:1.2rem}
+    label{display:block;margin:.5rem 0 .2rem;font-size:.9rem;color:#aaa}
+    input{width:100%;padding:.6rem;border-radius:8px;border:1px solid #333;
+          background:#0d0d0d;color:#eee;box-sizing:border-box}
+    button{margin-top:1rem;width:100%;padding:.7rem;border:0;border-radius:8px;
+           background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
+    button:hover{background:#2563eb}
+    .err{color:#f87171;margin-top:.7rem;font-size:.9rem}
+  </style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <h1>Remote Tool — Login</h1>
+    <label for="username">Логин</label>
+    <input id="username" name="username" autocomplete="username" required>
+    <label for="password">Пароль</label>
+    <input id="password" name="password" type="password"
+           autocomplete="current-password" required>
+    <button type="submit">Войти</button>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  </form>
+</body>
+</html>
