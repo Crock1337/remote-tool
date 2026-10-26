@@ -5,7 +5,7 @@ Remote access tool with web control panel.
 ## Components
 
 - `implant.cpp` — Windows implant (reverse connect)
-- `server_pro.py` — C2 listener + web UI
+- `server.py` — C2 listener + web UI
 - `dashboard.html` — Control panel (served by the server)
 
 ## Build implant
@@ -22,7 +22,7 @@ Change `HOST` in `implant.cpp` before building if needed.
 
 ```bash
 pip install flask
-python3 server_pro.py
+python3 server.py
 ```
 
 - Listener: `0.0.0.0:4444`
@@ -43,7 +43,7 @@ python3 server_pro.py
 
 ## Usage
 
-1. Start `server_pro.py`
+1. Start `server.py`
 2. Run the compiled implant on a Windows host
 3. Open the web UI, select the client, send commands
 
