@@ -55,19 +55,19 @@ python3 server.py
 4. Select the client and use the panel.
 
 ## Commands
-Command,Action
-info,Client information
-screenshot,Take screenshot
-webcam,Webcam photo
-proclist,List processes
-keylog_start,Start keylogger
-keylog_dump,Dump keylogger buffer
-keylog_stop,Stop keylogger
-keylog_clear,Clear keylogger buffer
-stream_start,Start screen stream
-stream_stop,Stop screen stream
-persist,Add scheduled task
-sh:<cmd>,Execute shell command
+- Command,Action
+- info,Client information
+- screenshot,Take screenshot
+- webcam,Webcam photo
+- proclist,List processes
+- keylog_start,Start keylogger
+- keylog_dump,Dump keylogger buffer
+- keylog_stop,Stop keylogger
+- keylog_clear,Clear keylogger buffer
+- stream_start,Start screen stream
+- stream_stop,Stop screen stream
+- persist,Add scheduled task
+- sh:<cmd>,Execute shell command
 
 ## Notes
 - Web UI listens only on localhost.
