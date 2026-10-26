@@ -12,7 +12,7 @@ from flask import Flask, send_from_directory, request, jsonify
 PORT = 4444
 WEB = 5000
 KEY = b"CrockKey2026!!CrockKey2026!!!!!"
-AUTH_TOKEN = "crock-local-token"
+AUTH_TOKEN = os.environ.get("CROCK_TOKEN", "crock-local-token")
 MAX_MSG = 8 * 1024 * 1024
 
 app = Flask(__name__)
@@ -78,7 +78,13 @@ def client_handler(conn, addr, cid):
             nonlocal recv_ctr
             ks = keystream(recv_ctr, len(data))
             recv_ctr += (len(data) + 31) // 32
-            return bytes(a ^ b for a, b in zip(data, ks))
+            plain = bytes(a ^ b for a, b in zip(data, ks))
+            if len(plain) < 8:
+                return b""
+            tag, msg = plain[:8], plain[8:]
+            if tag != mac(msg):
+                return b""
+            return msg
 
         try:
             info = json.loads(dec(payload).decode(errors='ignore'))
