@@ -7,12 +7,12 @@ KEY_LEN = 32
 NONCE_LEN = 12
 TAG_LEN = 16
 
-def derive_key(shared_secret: bytes, salt: bytes = b"swill-v1") -> bytes:
+def derive_key(shared_secret: bytes, salt: bytes = b"crock-v1") -> bytes:
     return HKDF(
         algorithm=hashes.SHA256(),
         length=KEY_LEN,
         salt=salt,
-        info=b"swill-session-key",
+        info=b"crock-session-key",
     ).derive(shared_secret)
 
 def encrypt_packet(key: bytes, plaintext: bytes) -> bytes:
