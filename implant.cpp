@@ -10,7 +10,9 @@
 #include <random>
 #include <thread>
 #include <chrono>
+#include <shlobj.h>
 
+#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "gdi32.lib")
