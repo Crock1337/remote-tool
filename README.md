@@ -85,6 +85,7 @@ For most cases behind NAT use a tunnel (ngrok / playit).
 
 ```bash
 sudo apt install -y gcc-mingw-w64
+sudo apt install -y patchelf
 pip install nuitka pillow cryptography ordered-set zstandard
 ```
 
