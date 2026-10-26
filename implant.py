@@ -28,12 +28,17 @@ def keystream(counter, length):
         c += 1
     return out[:length]
 
+def mac(data: bytes) -> bytes:
+    return hashlib.sha256(KEY + data).digest()[:8]
+
 def send_data(s, data, ctr):
     if isinstance(data, str):
         data = data.encode()
-    ks = keystream(ctr[0], len(data))
-    enc = bytes(a ^ b for a, b in zip(data, ks))
-    ctr[0] += (len(data) + 31) // 32
+    tag = mac(data)
+    body = tag + data
+    ks = keystream(ctr[0], len(body))
+    enc = bytes(a ^ b for a, b in zip(body, ks))
+    ctr[0] += (len(body) + 31) // 32
     s.sendall(struct.pack(">I", len(enc)) + enc)
 
 def recv_data(s, ctr):
@@ -41,15 +46,20 @@ def recv_data(s, ctr):
     if not raw:
         return ""
     length = struct.unpack(">I", raw)[0]
-    if length == 0 or length > 32*1024*1024:
+    if length == 0 or length > 8*1024*1024:
         return ""
     buf = recvall(s, length)
-    if not buf:
+    if not buf or len(buf) != length:
         return ""
     ks = keystream(ctr[0], len(buf))
     plain = bytes(a ^ b for a, b in zip(buf, ks))
     ctr[0] += (len(buf) + 31) // 32
-    return plain.decode(errors="ignore")
+    if len(plain) < 8:
+        return ""
+    tag, msg = plain[:8], plain[8:]
+    if tag != mac(msg):
+        return ""
+    return msg.decode(errors="ignore")
 
 def recvall(s, n):
     data = b""
