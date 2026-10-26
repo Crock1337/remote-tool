@@ -31,17 +31,29 @@ def check_auth():
     return token == AUTH_TOKEN
 
 
-def keystream(counter, length):
+def hkdf(key, salt, info, length=32):
+    prk = hmac.new(salt, key, hashlib.sha256).digest()
+    out = b""
+    t = b""
+    counter = 1
+    while len(out) < length:
+        t = hmac.new(prk, t + info + bytes([counter]), hashlib.sha256).digest()
+        out += t
+        counter += 1
+    return out[:length]
+
+
+def keystream(key_enc, counter, length):
     out = b""
     c = counter
     while len(out) < length:
-        out += hashlib.sha256(KEY + struct.pack("<I", c)).digest()
+        out += hashlib.sha256(key_enc + struct.pack("<Q", c)).digest()
         c += 1
     return out[:length]
 
 
-def mac(data):
-    return hmac.new(KEY, data, hashlib.sha256).digest()[:16]
+def mac(key_mac, data):
+    return hmac.new(key_mac, data, hashlib.sha256).digest()[:16]
 
 
 def recvall(sock, n):
@@ -62,8 +74,11 @@ class Client:
         self.info = {}
         self.alive = True
         self.send_lock = threading.Lock()
-        self.send_ctr = 0x1337
-        self.recv_ctr = 0x1337
+        self.cmd_lock = threading.Lock()
+        self.key_enc = None
+        self.key_mac = None
+        self.send_ctr = 0
+        self.recv_ctr = 0
         self.latest_frame = None
         self.streaming = False
         self.pending = None
@@ -76,8 +91,8 @@ class Client:
     def _send_msg(self, data):
         if isinstance(data, str):
             data = data.encode()
-        body = mac(data) + data
-        ks = keystream(self.send_ctr, len(body))
+        body = mac(self.key_mac, data) + data
+        ks = keystream(self.key_enc, self.send_ctr, len(body))
         enc = bytes(a ^ b for a, b in zip(body, ks))
         self.send_ctr += (len(body) + 31) // 32
         self.conn.sendall(struct.pack(">I", len(enc)) + enc)
@@ -92,13 +107,13 @@ class Client:
         buf = recvall(self.conn, length)
         if not buf or len(buf) != length:
             return None
-        ks = keystream(self.recv_ctr, len(buf))
+        ks = keystream(self.key_enc, self.recv_ctr, len(buf))
         plain = bytes(a ^ b for a, b in zip(buf, ks))
         self.recv_ctr += (len(buf) + 31) // 32
         if len(plain) < 16:
             return None
         tag, msg = plain[:16], plain[16:]
-        if not hmac.compare_digest(tag, mac(msg)):
+        if not hmac.compare_digest(tag, mac(self.key_mac, msg)):
             return None
         return msg.decode(errors="ignore")
 
@@ -113,10 +128,7 @@ class Client:
                 else:
                     p = self.pending
                     if p is not None:
-                        try:
-                            p.put_nowait(msg)
-                        except queue.Full:
-                            pass
+                        p.put_nowait(msg)
         except Exception:
             pass
         finally:
@@ -127,37 +139,38 @@ class Client:
                 pass
             p = self.pending
             if p is not None:
-                try:
-                    p.put_nowait("__disconnected__")
-                except queue.Full:
-                    pass
+                p.put_nowait("__disconnected__")
 
     def send_cmd(self, cmd, timeout=CMD_TIMEOUT):
         if not self.alive:
             return "offline"
-        with self.send_lock:
+        with self.cmd_lock:
             if not self.alive:
                 return "offline"
-            self.pending = queue.Queue()
+            with self.send_lock:
+                if not self.alive:
+                    return "offline"
+                self.pending = queue.Queue()
+                try:
+                    self._send_msg(cmd)
+                except Exception as e:
+                    self.alive = False
+                    try:
+                        self.conn.close()
+                    except Exception:
+                        pass
+                    self.pending = None
+                    return "error: " + str(e)
             try:
-                self._send_msg(cmd)
                 try:
                     resp = self.pending.get(timeout=timeout)
                 except queue.Empty:
-                    # avoid desync — kill the connection
                     self.alive = False
                     try:
                         self.conn.close()
                     except Exception:
                         pass
                     return "timeout"
-            except Exception as e:
-                self.alive = False
-                try:
-                    self.conn.close()
-                except Exception:
-                    pass
-                return "error: " + str(e)
             finally:
                 self.pending = None
             if resp == "__disconnected__":
@@ -169,6 +182,19 @@ def client_handler(conn, addr):
     try:
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         conn.settimeout(15)
+
+        nonce_c = recvall(conn, 16)
+        if not nonce_c or len(nonce_c) != 16:
+            conn.close()
+            return
+
+        nonce_s = os.urandom(16)
+        conn.sendall(nonce_s)
+
+        salt = nonce_c + nonce_s
+        key_enc = hkdf(KEY, salt, b"crock-enc-v1", 32)
+        key_mac = hkdf(KEY, salt, b"crock-mac-v1", 32)
+
         raw = recvall(conn, 4)
         if not raw:
             conn.close()
@@ -182,15 +208,15 @@ def client_handler(conn, addr):
             conn.close()
             return
 
-        recv_ctr = 0x1337
-        ks = keystream(recv_ctr, len(payload))
+        recv_ctr = 0
+        ks = keystream(key_enc, recv_ctr, len(payload))
         plain = bytes(a ^ b for a, b in zip(payload, ks))
         recv_ctr += (len(payload) + 31) // 32
         if len(plain) < 16:
             conn.close()
             return
         tag, msg = plain[:16], plain[16:]
-        if not hmac.compare_digest(tag, mac(msg)):
+        if not hmac.compare_digest(tag, mac(key_mac, msg)):
             conn.close()
             return
         try:
@@ -204,9 +230,12 @@ def client_handler(conn, addr):
 
         client = Client(conn, addr, cid)
         client.info = info
+        client.key_enc = key_enc
+        client.key_mac = key_mac
         client.recv_ctr = recv_ctr
+        client.send_ctr = 0
 
-        conn.settimeout(None)  # blocking reads in the reader thread
+        conn.settimeout(None)
 
         with clients_lock:
             clients[cid] = client
@@ -214,8 +243,7 @@ def client_handler(conn, addr):
         client.start()
         print(f"[+] Client {cid} ({info.get('u')}@{info.get('h')}) from {addr[0]}")
 
-        while client.alive:
-            time.sleep(1)
+        client.reader_thread.join()
 
         with clients_lock:
             clients.pop(cid, None)
