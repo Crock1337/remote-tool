@@ -1,46 +1,46 @@
-import os, struct
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
+import os, time, jwt
+from functools import wraps
+from flask import request, jsonify
 
-KEY_LEN = 32
-NONCE_LEN = 12
-TAG_LEN = 16
+JWT_SECRET_FILE = ".jwt_secret"
+JWT_ALGO = "HS256"
+JWT_TTL = 3600
 
-def derive_key(shared_secret: bytes, salt: bytes = b"crock-v1") -> bytes:
-    return HKDF(
-        algorithm=hashes.SHA256(),
-        length=KEY_LEN,
-        salt=salt,
-        info=b"crock-session-key",
-    ).derive(shared_secret)
+def _load_or_create_secret() -> bytes:
+    if os.path.exists(JWT_SECRET_FILE):
+        with open(JWT_SECRET_FILE, "rb") as f:
+            return f.read()
+    secret = os.urandom(32)
+    fd = os.open(JWT_SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(secret)
+    return secret
 
-def encrypt_packet(key: bytes, plaintext: bytes) -> bytes:
-    nonce = os.urandom(NONCE_LEN)
-    ct = AESGCM(key).encrypt(nonce, plaintext, None)
-    return nonce + ct
+JWT_SECRET = _load_or_create_secret()
 
-def decrypt_packet(key: bytes, packet: bytes) -> bytes:
-    if len(packet) < NONCE_LEN + TAG_LEN:
-        raise ValueError("packet too short")
-    nonce, ct = packet[:NONCE_LEN], packet[NONCE_LEN:]
-    return AESGCM(key).decrypt(nonce, ct, None)
+ROLES = {"viewer": 1, "operator": 2, "admin": 3}
 
-def recv_exact(sock, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError("socket closed")
-        buf += chunk
-    return buf
+def issue_token(username: str, role: str) -> str:
+    now = int(time.time())
+    payload = {"sub": username, "role": role, "iat": now, "exp": now + JWT_TTL}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 
-def send_frame(sock, key: bytes, plaintext: bytes):
-    pkt = encrypt_packet(key, plaintext)
-    sock.sendall(struct.pack("!I", len(pkt)) + pkt)
-
-def recv_frame(sock, key: bytes) -> bytes:
-    (n,) = struct.unpack("!I", recv_exact(sock, 4))
-    if n > 64 * 1024 * 1024:
-        raise ValueError("frame too large")
-    return decrypt_packet(key, recv_exact(sock, n))
+def require_role(min_role: str):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            hdr = request.headers.get("Authorization", "")
+            if not hdr.startswith("Bearer "):
+                return jsonify({"error": "missing token"}), 401
+            try:
+                payload = jwt.decode(hdr[7:], JWT_SECRET, algorithms=[JWT_ALGO])
+            except jwt.ExpiredSignatureError:
+                return jsonify({"error": "token expired"}), 401
+            except jwt.InvalidTokenError:
+                return jsonify({"error": "invalid token"}), 401
+            if ROLES.get(payload.get("role"), 0) < ROLES[min_role]:
+                return jsonify({"error": "forbidden"}), 403
+            request.user = payload
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
