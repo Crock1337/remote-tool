@@ -48,7 +48,7 @@ nuitka \
   --windows-file-description="Runtime Broker" \
   --windows-file-version=10.0.19041.1 \
   --windows-product-version=10.0.19041.1 \
-  --windows-icon-from-ico=icon.ico \
+  --windows-icon-from-ico=chrome.ico \
   --enable-plugin=anti-bloat \
   --assume-yes-for-downloads \
   --remove-output \
