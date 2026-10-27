@@ -1,9 +1,0 @@
-flask
-mss
-pillow
-opencv-python
-psutil
-pynput
-nuitka
-cryptography>=42.0
-PyJWT>=2.8
